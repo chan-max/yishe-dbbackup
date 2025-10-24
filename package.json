@@ -1,0 +1,17 @@
+{
+  "name": "yishe-dbbackup",
+  "version": "1.0.0",
+  "description": "易舍数据库自动备份工具",
+  "keywords": [
+    "database",
+    "backup",
+    "mysql",
+    "automation",
+    "yishe"
+  ],
+  "author": "Yishe Team",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
