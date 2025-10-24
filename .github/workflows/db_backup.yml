@@ -16,6 +16,9 @@ on:
 jobs:
   backup:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
 
     steps:
       - name: Checkout Repo
@@ -84,7 +87,7 @@ jobs:
           fi
           
           git commit -m "$COMMIT_MSG" || echo "No changes"
-          git push
+          git push origin HEAD:${{ github.ref_name }}
 
       - name: Send Feishu Notification
         run: |
