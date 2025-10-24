@@ -42,7 +42,14 @@ jobs:
       - name: Run Backup Command on Remote Server
         run: |
           sshpass -p "${{ secrets.SERVER_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }} "
-            mysqldump -u${{ secrets.DATABASE_USERNAME }} -p'${{ secrets.DATABASE_PASSWORD }}' s1 > ~/backup.sql &&
+            # 测试数据库连接
+            mysql -u${{ secrets.DATABASE_USERNAME }} -p'${{ secrets.DATABASE_PASSWORD }}' -e 'SELECT 1;' s1 || {
+              echo 'Database connection test failed'
+              exit 1
+            }
+            
+            # 执行备份
+            mysqldump -u${{ secrets.DATABASE_USERNAME }} -p'${{ secrets.DATABASE_PASSWORD }}' --single-transaction --routines --triggers s1 > ~/backup.sql &&
             gzip -f ~/backup.sql
           "
 
