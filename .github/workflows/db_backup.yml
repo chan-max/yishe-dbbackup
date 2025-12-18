@@ -3,7 +3,7 @@ name: 数据库自动备份
 on:
   # 定时备份：每天 6点、18点执行
   schedule:
-    - cron: '0 6,18 * * *'
+    - cron: '0 6 * * *'
   # 手动触发
   workflow_dispatch:
   # 分支推送时触发备份
