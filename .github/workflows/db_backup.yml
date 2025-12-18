@@ -1,21 +1,34 @@
 name: 数据库自动备份
 
 on:
-  # 定时备份：每天 6点、18点执行
+  # 定时备份：每天 6 点执行
   schedule:
     - cron: '0 6 * * *'
+
   # 手动触发
   workflow_dispatch:
-  # 分支推送时触发备份
+
+  # 分支推送时触发
   push:
-    branches: [ main, master, develop, feature/*, hotfix/*, release/* ]
-  # Pull Request 时触发备份
+    branches:
+      - main
+      - master
+      - develop
+      - feature/*
+      - hotfix/*
+      - release/*
+
+  # PR 触发
   pull_request:
-    branches: [ main, master, develop ]
+    branches:
+      - main
+      - master
+      - develop
 
 jobs:
   backup:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
       pull-requests: write
@@ -25,7 +38,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install sshpass & curl
-        run: sudo apt-get update && sudo apt-get install -y sshpass curl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass curl
 
       - name: Get Event Info
         id: event_info
@@ -35,98 +50,123 @@ jobs:
           echo "ref_name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           echo "actor=${{ github.actor }}" >> $GITHUB_OUTPUT
           echo "sha=${{ github.sha }}" >> $GITHUB_OUTPUT
-          
-          # 获取提交信息
+
+          # push 事件才存在 head_commit
           if [ "${{ github.event_name }}" = "push" ]; then
-            echo "commit_message=${{ github.event.head_commit.message }}" >> $GITHUB_OUTPUT
+            {
+              echo "commit_message<<EOF"
+              echo "${{ github.event.head_commit.message }}"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+
             echo "commit_author=${{ github.event.head_commit.author.name }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Run Backup Command on Remote Server
         run: |
-          sshpass -p "${{ secrets.SERVER_PASSWORD }}" ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }} "
-            # 测试数据库连接
-            mysql -u${{ secrets.DATABASE_USERNAME }} -p'${{ secrets.DATABASE_PASSWORD }}' -e 'SELECT 1;' s1 || {
-              echo 'Database connection test failed'
-              exit 1
-            }
-            
-            # 执行备份
-            mysqldump -u${{ secrets.DATABASE_USERNAME }} -p'${{ secrets.DATABASE_PASSWORD }}' --single-transaction --routines --triggers s1 > ~/backup.sql &&
+          sshpass -p "${{ secrets.SERVER_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
+          ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }} << 'EOF'
+            set -e
+
+            echo "Testing database connection..."
+            mysql -u${{ secrets.DATABASE_USERNAME }} -p'${{ secrets.DATABASE_PASSWORD }}' \
+              -e 'SELECT 1;' s1
+
+            echo "Running mysqldump..."
+            mysqldump \
+              -u${{ secrets.DATABASE_USERNAME }} \
+              -p'${{ secrets.DATABASE_PASSWORD }}' \
+              --single-transaction \
+              --routines \
+              --triggers \
+              s1 > ~/backup.sql
+
             gzip -f ~/backup.sql
-          "
+          EOF
 
       - name: Copy Backup File
         run: |
           sshpass -p "${{ secrets.SERVER_PASSWORD }}" scp -o StrictHostKeyChecking=no \
-            ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }}:~/backup.sql.gz ./backup.sql.gz
+            ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }}:~/backup.sql.gz \
+            ./backup.sql.gz
 
-      - name: Save, Limit to 1 Week Backups, and Commit
+      - name: Save Backup, Keep 7 Days, Commit
         run: |
+          set -e
+
           mkdir -p db_backups
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-          mv backup.sql.gz db_backups/backup_$TIMESTAMP.sql.gz
-          # 只保留近一周的备份，删除超过7天的备份文件
+          mv backup.sql.gz db_backups/backup_${TIMESTAMP}.sql.gz
+
+          # 仅保留 7 天内的备份
           find db_backups -name "backup_*.sql.gz" -mtime +7 -delete
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add db_backups/backup_*.sql.gz
-          
-          # 根据触发方式生成不同的提交信息
-          if [ "${{ steps.event_info.outputs.event_name }}" = "schedule" ]; then
-            COMMIT_MSG="🕒 定时备份 at $TIMESTAMP"
-          elif [ "${{ steps.event_info.outputs.event_name }}" = "workflow_dispatch" ]; then
-            COMMIT_MSG="🖱️ 手动触发备份 at $TIMESTAMP"
-          elif [ "${{ steps.event_info.outputs.event_name }}" = "push" ]; then
-            COMMIT_MSG="🚀 分支推送触发备份 at $TIMESTAMP (分支: ${{ steps.event_info.outputs.ref_name }})"
-          elif [ "${{ steps.event_info.outputs.event_name }}" = "pull_request" ]; then
-            COMMIT_MSG="🔀 PR触发备份 at $TIMESTAMP (分支: ${{ steps.event_info.outputs.ref_name }})"
-          else
-            COMMIT_MSG="📦 自动备份 at $TIMESTAMP"
-          fi
-          
-          git commit -m "$COMMIT_MSG" || echo "No changes"
+
+          git add db_backups
+
+          EVENT_NAME="${{ steps.event_info.outputs.event_name }}"
+          REF_NAME="${{ steps.event_info.outputs.ref_name }}"
+
+          case "$EVENT_NAME" in
+            schedule)
+              COMMIT_MSG="定时数据库备份 (${TIMESTAMP})"
+              ;;
+            workflow_dispatch)
+              COMMIT_MSG="手动触发数据库备份 (${TIMESTAMP})"
+              ;;
+            push)
+              COMMIT_MSG="分支推送触发数据库备份 (${TIMESTAMP}) [${REF_NAME}]"
+              ;;
+            pull_request)
+              COMMIT_MSG="PR 触发数据库备份 (${TIMESTAMP}) [${REF_NAME}]"
+              ;;
+            *)
+              COMMIT_MSG="自动数据库备份 (${TIMESTAMP})"
+              ;;
+          esac
+
+          git commit -m "$COMMIT_MSG" || echo "No changes to commit"
           git push origin HEAD:${{ github.ref_name }}
 
       - name: Send Feishu Notification
         run: |
-          # 根据触发方式生成不同的通知消息
           EVENT_NAME="${{ steps.event_info.outputs.event_name }}"
           REF_NAME="${{ steps.event_info.outputs.ref_name }}"
           ACTOR="${{ steps.event_info.outputs.actor }}"
-          
-          case $EVENT_NAME in
-            "schedule")
-              TRIGGER_INFO="⏰ 定时备份（每天6点、18点）"
+
+          case "$EVENT_NAME" in
+            schedule)
+              TRIGGER_INFO="定时备份（每天 6 点）"
               ;;
-            "workflow_dispatch")
-              TRIGGER_INFO="🖱️ 手动触发备份"
+            workflow_dispatch)
+              TRIGGER_INFO="手动触发"
               ;;
-            "push")
-              TRIGGER_INFO="🚀 分支推送触发备份\n• 分支: $REF_NAME\n• 提交者: $ACTOR"
+            push)
+              TRIGGER_INFO="分支推送\n分支：$REF_NAME\n操作者：$ACTOR"
               ;;
-            "pull_request")
-              TRIGGER_INFO="🔀 Pull Request触发备份\n• 分支: $REF_NAME\n• 提交者: $ACTOR"
+            pull_request)
+              TRIGGER_INFO="Pull Request\n分支：$REF_NAME\n操作者：$ACTOR"
               ;;
             *)
-              TRIGGER_INFO="📦 自动备份"
+              TRIGGER_INFO="自动触发"
               ;;
           esac
-          
-          curl -X POST ${{ secrets.FEISHU_WEBHOOK_URL }} \
+
+          curl -X POST "${{ secrets.FEISHU_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
-            -d '{
-              "msg_type": "text",
-              "content": {
-                "text": "🎉 数据库 s1 备份成功！\n\n📌 备份信息：\n• 时间：'"$(date +'%Y-%m-%d %H:%M:%S')"'\n• 服务器：${{ secrets.SERVER_HOST }}\n• 触发方式：'"$TRIGGER_INFO"'\n\n✨ 备份文件已上传至仓库 db_backups 目录。\n📅 备份策略：定时备份 + 代码推送触发，保留近一周数据。"
+            -d "{
+              \"msg_type\": \"text\",
+              \"content\": {
+                \"text\": \"数据库 s1 备份成功\n\n时间：$(date '+%Y-%m-%d %H:%M:%S')\n服务器：${{ secrets.SERVER_HOST }}\n触发方式：$TRIGGER_INFO\n\n备份文件已提交至仓库 db_backups 目录，仅保留最近 7 天。\"
               }
-            }'
+            }"
 
       - name: Debug Info
         run: |
-          echo "Event Name: ${{ steps.event_info.outputs.event_name }}"
-          echo "Ref: ${{ steps.event_info.outputs.ref }}"
-          echo "Ref Name: ${{ steps.event_info.outputs.ref_name }}"
-          echo "Actor: ${{ steps.event_info.outputs.actor }}"
-          echo "SHA: ${{ steps.event_info.outputs.sha }}"
+          echo "Event Name : ${{ steps.event_info.outputs.event_name }}"
+          echo "Ref        : ${{ steps.event_info.outputs.ref }}"
+          echo "Ref Name   : ${{ steps.event_info.outputs.ref_name }}"
+          echo "Actor      : ${{ steps.event_info.outputs.actor }}"
+          echo "SHA        : ${{ steps.event_info.outputs.sha }}"
